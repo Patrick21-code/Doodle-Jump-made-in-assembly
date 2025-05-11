@@ -1,0 +1,1315 @@
+# Doodle Jump - MIPS Assembly Implementation
+# This program implements a simplified version of the classic Doodle Jump game
+# using the MARS MIPS simulator with Bitmap Display and Keyboard MMIO.
+
+# --------------------------------
+# Data Segment
+# --------------------------------
+.data
+	# Display settings
+	displayAddress:	.word 0x10008000	# Base address for bitmap display
+	displayWidth:	.word 512		# Display width in pixels
+	displayHeight:	.word 512		# Display height in pixels
+	unitSize:	.word 8			# Size of each unit/pixel
+	
+	# Colors
+	backgroundColor:.word 0x87CEEB	# Sky blue background
+	platformColor:	.word 0x228B22	# Forest green platforms  
+	playerColor:	.word 0xFF0000	# Red player
+	scoreColor:	.word 0xFFFFFF	# White score text
+	obstacleColor:	.word 0x800080	# Purple obstacles
+	bonusColor:	.word 0xFFD700	# Gold bonuses
+	
+	# Game state
+	playerX:	.word 30		# Player X position (in units)
+	playerY:	.word 48		# Player Y position (in units)
+	playerWidth:	.word 4			# Player width in units
+	playerHeight:	.word 4			# Player height in units
+	playerVelocityY:.word 0			# Player Y velocity
+	playerJumpStrength: .word -12		# Initial jump velocity
+	gravity:	.word 1			# Gravity strength
+	
+	# Platform data - array of [x, y] pairs, each entry is 8 bytes
+	platformCount:	.word 8			# Number of platforms
+	platforms:	.space 64		# 8 platforms * 8 bytes each
+	
+	# Obstacle data - array of [x, y] pairs, each entry is 8 bytes
+	obstacleCount:	.word 3			# Number of obstacles
+	obstacles:	.space 24		# 3 obstacles * 8 bytes each
+	
+	# Bonus data - array of [x, y, active] entries, each entry is 12 bytes
+	bonusCount:	.word 2			# Number of bonuses
+	bonuses:	.space 24		# 2 bonuses * 12 bytes each
+	
+	# Game variables
+	score:		.word 0			# Player score
+	highScore:	.word 0			# High score
+	gameActive:	.word 1			# 1 if game is running, 0 if game over
+	cameraOffsetY:	.word 0			# Camera vertical offset for scrolling
+	
+	# Text strings
+	gameOverMsg:	.asciiz "Game Over! Press 'r' to restart."
+	scoreMsg:	.asciiz "Score: "
+	highScoreMsg:	.asciiz "High Score: "
+	
+	# Random seed
+	randomSeed:	.word 0			# Seed for random number generation
+
+# --------------------------------
+# Main Program
+# --------------------------------
+.text
+.globl main
+
+main:
+	# Initialize the game
+	jal initGame
+	
+	# Main game loop
+gameLoop:
+	# Check if game is active
+	lw $t0, gameActive
+	beqz $t0, gameOverScreen
+	
+	# Process keyboard input
+	jal processInput
+	
+	# Update game state
+	jal updateGame
+	
+	# Render the game
+	jal renderGame
+	
+	# Small delay for game speed control
+	li $v0, 32		# syscall 32: sleep
+	li $a0, 50		# Sleep for 50ms
+	syscall
+	
+	j gameLoop		# Continue game loop
+	
+gameOverScreen:
+	# Display game over screen
+	jal drawGameOver
+	
+	# Check for restart input
+	jal checkRestartInput
+	
+	# Small delay
+	li $v0, 32		# syscall 32: sleep
+	li $a0, 50		# Sleep for 50ms
+	syscall
+	
+	j gameOverScreen	# Loop until restart
+	
+# --------------------------------
+# Game Initialization
+# --------------------------------
+initGame:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Initialize random seed based on system time
+	li $v0, 30		# syscall 30: get system time
+	syscall
+	sw $a0, randomSeed	# Store the lower 32 bits as seed
+	
+	# Initialize player
+	li $t0, 30		# Starting X position
+	sw $t0, playerX
+	li $t0, 48		# Starting Y position
+	sw $t0, playerY
+	sw $zero, playerVelocityY # Zero initial velocity
+	sw $zero, cameraOffsetY	# Zero camera offset
+	
+	# Initialize score
+	sw $zero, score
+	
+	# Set game as active
+	li $t0, 1
+	sw $t0, gameActive
+	
+	# Initialize platforms
+	jal initPlatforms
+	
+	# Initialize obstacles
+	jal initObstacles
+	
+	# Initialize bonuses
+	jal initBonuses
+	
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Platform Initialization
+# --------------------------------
+initPlatforms:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# First platform right under the player
+	la $t0, platforms
+	li $t1, 28		# X position of first platform
+	sw $t1, 0($t0)
+	li $t1, 52		# Y position of first platform
+	sw $t1, 4($t0)
+	
+	# Generate the remaining platforms
+	li $t1, 1		# Platform counter
+	lw $t2, platformCount	# Total platforms
+	
+initPlatformLoop:
+	beq $t1, $t2, initPlatformsDone
+	
+	# Calculate offset in platforms array
+	mul $t3, $t1, 8		# Each platform entry is 8 bytes
+	add $t0, $t0, $t3	# Move to next platform
+	
+	# Generate random X position (0-56)
+	jal random
+	li $t4, 57
+	rem $t5, $v0, $t4
+	sw $t5, 0($t0)		# Store X
+	
+	# Generate random Y position spread out vertically
+	mul $t4, $t1, 8		# Space platforms vertically
+	li $t5, 52		# Start Y position
+	sub $t5, $t5, $t4	# Decrement Y for each platform
+	
+	# Add small random offset (-2 to +2)
+	jal random
+	li $t6, 5
+	rem $t6, $v0, $t6
+	addi $t6, $t6, -2
+	add $t5, $t5, $t6
+	
+	sw $t5, 4($t0)		# Store Y
+	
+	# Move to the next platform entry
+	sub $t0, $t0, $t3	# Reset pointer to beginning of array
+	addi $t1, $t1, 1	# Increment counter
+	j initPlatformLoop
+	
+initPlatformsDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Obstacle Initialization
+# --------------------------------
+initObstacles:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Generate obstacles
+	la $t0, obstacles
+	li $t1, 0		# Obstacle counter
+	lw $t2, obstacleCount	# Total obstacles
+	
+initObstacleLoop:
+	beq $t1, $t2, initObstaclesDone
+	
+	# Calculate offset in obstacles array
+	mul $t3, $t1, 8		# Each obstacle entry is 8 bytes
+	add $t4, $t0, $t3	# Move to next obstacle
+	
+	# Generate random X position (0-56)
+	jal random
+	li $t5, 57
+	rem $t6, $v0, $t5
+	sw $t6, 0($t4)		# Store X
+	
+	# Generate random Y position higher than player's initial position
+	jal random
+	li $t5, 40
+	rem $t6, $v0, $t5
+	addi $t6, $t6, -80	# Position well above the player's starting position
+	sw $t6, 4($t4)		# Store Y
+	
+	addi $t1, $t1, 1	# Increment counter
+	j initObstacleLoop
+	
+initObstaclesDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Bonus Initialization
+# --------------------------------
+initBonuses:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Generate bonuses
+	la $t0, bonuses
+	li $t1, 0		# Bonus counter
+	lw $t2, bonusCount	# Total bonuses
+	
+initBonusLoop:
+	beq $t1, $t2, initBonusesDone
+	
+	# Calculate offset in bonuses array
+	mul $t3, $t1, 12	# Each bonus entry is 12 bytes (x, y, active)
+	add $t4, $t0, $t3	# Move to next bonus
+	
+	# Generate random X position (0-56)
+	jal random
+	li $t5, 57
+	rem $t6, $v0, $t5
+	sw $t6, 0($t4)		# Store X
+	
+	# Generate random Y position higher than player's initial position
+	jal random
+	li $t5, 60
+	rem $t6, $v0, $t5
+	addi $t6, $t6, -100	# Position well above the player's starting position
+	sw $t6, 4($t4)		# Store Y
+	
+	# Set bonus as active
+	li $t6, 1
+	sw $t6, 8($t4)		# Store active flag
+	
+	addi $t1, $t1, 1	# Increment counter
+	j initBonusLoop
+	
+initBonusesDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Input Processing
+# --------------------------------
+processInput:
+	# Check for keyboard input
+	li $t0, 0xffff0000	# Keyboard control address
+	lw $t1, 0($t0)		# Check if input is available
+	beqz $t1, inputDone	# If no input, return
+	
+	# Read the input
+	lw $t2, 4($t0)		# Get the input character
+	
+	# Check for restart (press 'r')
+	li $t3, 'r'
+	beq $t2, $t3, restartGame
+	li $t3, 0x72		# ASCII for 'r'
+	beq $t2, $t3, restartGame
+	li $t3, 0x52		# ASCII for 'R'
+	beq $t2, $t3, restartGame
+	
+restartInputDone:
+	jr $ra
+	
+restartGame:
+	# Reinitialize the game
+	jal initGame
+	jr $ra
+
+# --------------------------------
+# Random Number Generator
+# --------------------------------
+random:
+	# LCG parameters for a simple random number generator
+	# new_seed = (multiplier * seed + increment) % modulus
+	lw $t0, randomSeed		# Load current seed
+	li $t1, 1103515245		# Multiplier
+	li $t2, 12345			# Increment
+	
+	mul $t0, $t0, $t1		# seed * multiplier
+	add $t0, $t0, $t2		# + increment
+	li $t3, 0x7FFFFFFF		# modulus (2^31 - 1)
+	and $t0, $t0, $t3		# Apply modulus using bitwise AND
+	
+	sw $t0, randomSeed		# Store new seed
+	move $v0, $t0			# Return the random value
+	jr $ra
+
+# --------------------------------
+# Rendering
+# --------------------------------
+renderGame:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Clear the screen
+	jal clearScreen
+	
+	# Draw platforms
+	jal drawPlatforms
+	
+	# Draw obstacles
+	jal drawObstacles
+	
+	# Draw bonuses
+	jal drawBonuses
+	
+	# Draw player
+	jal drawPlayer
+	
+	# Draw score
+	jal drawScore
+	
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Clear Screen
+# --------------------------------
+clearScreen:
+	# Load bitmap display base address
+	lw $t0, displayAddress
+	
+	# Load display dimensions
+	lw $t1, displayWidth
+	lw $t2, displayHeight
+	
+	# Calculate total number of pixels
+	mul $t3, $t1, $t2
+	srl $t3, $t3, 2		# Divide by 4 (each pixel is a word)
+	
+	# Load background color
+	lw $t4, backgroundColor
+	
+	# Set counter
+	li $t5, 0
+	
+clearLoop:
+	beq $t5, $t3, clearDone
+	
+	# Calculate pixel address
+	sll $t6, $t5, 2		# Multiply counter by 4 (word size)
+	add $t7, $t0, $t6	# Add to base address
+	
+	# Set pixel to background color
+	sw $t4, 0($t7)
+	
+	# Increment counter
+	addi $t5, $t5, 1
+	j clearLoop
+	
+clearDone:
+	jr $ra
+
+# --------------------------------
+# Draw Player
+# --------------------------------
+drawPlayer:
+	# Get player position
+	lw $t0, playerX
+	lw $t1, playerY
+	lw $t2, playerWidth
+	lw $t3, playerHeight
+	
+	# Calculate screen position
+	move $a0, $t0
+	move $a1, $t1
+	move $a2, $t2
+	move $a3, $t3
+	lw $t4, playerColor
+	
+	# Draw player as a rectangle
+	jal drawRectangle
+	
+	jr $ra
+
+# --------------------------------
+# Draw Platforms
+# --------------------------------
+drawPlatforms:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Load platform data
+	la $t0, platforms
+	li $t1, 0		# Platform counter
+	lw $t2, platformCount
+	lw $t3, platformColor
+	
+drawPlatformsLoop:
+	beq $t1, $t2, drawPlatformsDone
+	
+	# Calculate offset in platforms array
+	mul $t4, $t1, 8		# Each platform entry is 8 bytes
+	add $t5, $t0, $t4	# Point to current platform
+	
+	# Get platform position
+	lw $t6, 0($t5)		# Platform X
+	lw $t7, 4($t5)		# Platform Y
+	
+	# Draw the platform
+	move $a0, $t6		# X position
+	move $a1, $t7		# Y position
+	li $a2, 10		# Width
+	li $a3, 2		# Height
+	move $t8, $t3		# Color
+	
+	# Save required registers
+	addi $sp, $sp, -20
+	sw $t0, 0($sp)
+	sw $t1, 4($sp)
+	sw $t2, 8($sp)
+	sw $t3, 12($sp)
+	sw $t4, 16($sp)
+	
+	# Draw the platform
+	jal drawRectangle
+	
+	# Restore registers
+	lw $t0, 0($sp)
+	lw $t1, 4($sp)
+	lw $t2, 8($sp)
+	lw $t3, 12($sp)
+	lw $t4, 16($sp)
+	addi $sp, $sp, 20
+	
+	addi $t1, $t1, 1	# Next platform
+	j drawPlatformsLoop
+	
+drawPlatformsDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Draw Obstacles
+# --------------------------------
+drawObstacles:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Load obstacle data
+	la $t0, obstacles
+	li $t1, 0		# Obstacle counter
+	lw $t2, obstacleCount
+	lw $t3, obstacleColor
+	
+drawObstaclesLoop:
+	beq $t1, $t2, drawObstaclesDone
+	
+	# Calculate offset in obstacles array
+	mul $t4, $t1, 8		# Each obstacle entry is 8 bytes
+	add $t5, $t0, $t4	# Point to current obstacle
+	
+	# Get obstacle position
+	lw $t6, 0($t5)		# Obstacle X
+	lw $t7, 4($t5)		# Obstacle Y
+	
+	# Draw the obstacle
+	move $a0, $t6		# X position
+	move $a1, $t7		# Y position
+	li $a2, 4		# Width
+	li $a3, 4		# Height
+	move $t8, $t3		# Color
+	
+	# Save required registers
+	addi $sp, $sp, -20
+	sw $t0, 0($sp)
+	sw $t1, 4($sp)
+	sw $t2, 8($sp)
+	sw $t3, 12($sp)
+	sw $t4, 16($sp)
+	
+	# Draw the obstacle
+	jal drawRectangle
+	
+	# Restore registers
+	lw $t0, 0($sp)
+	lw $t1, 4($sp)
+	lw $t2, 8($sp)
+	lw $t3, 12($sp)
+	lw $t4, 16($sp)
+	addi $sp, $sp, 20
+	
+	addi $t1, $t1, 1	# Next obstacle
+	j drawObstaclesLoop
+	
+drawObstaclesDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Draw Bonuses
+# --------------------------------
+drawBonuses:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Load bonus data
+	la $t0, bonuses
+	li $t1, 0		# Bonus counter
+	lw $t2, bonusCount
+	lw $t3, bonusColor
+	
+drawBonusesLoop:
+	beq $t1, $t2, drawBonusesDone
+	
+	# Calculate offset in bonuses array
+	mul $t4, $t1, 12	# Each bonus entry is 12 bytes
+	add $t5, $t0, $t4	# Point to current bonus
+	
+	# Skip if bonus is not active
+	lw $t6, 8($t5)
+	beqz $t6, nextBonusDraw
+	
+	# Get bonus position
+	lw $t6, 0($t5)		# Bonus X
+	lw $t7, 4($t5)		# Bonus Y
+	
+	# Draw the bonus
+	move $a0, $t6		# X position
+	move $a1, $t7		# Y position
+	li $a2, 3		# Width
+	li $a3, 3		# Height
+	move $t8, $t3		# Color
+	
+	# Save required registers
+	addi $sp, $sp, -20
+	sw $t0, 0($sp)
+	sw $t1, 4($sp)
+	sw $t2, 8($sp)
+	sw $t3, 12($sp)
+	sw $t4, 16($sp)
+	
+	# Draw the bonus
+	jal drawRectangle
+	
+	# Restore registers
+	lw $t0, 0($sp)
+	lw $t1, 4($sp)
+	lw $t2, 8($sp)
+	lw $t3, 12($sp)
+	lw $t4, 16($sp)
+	addi $sp, $sp, 20
+	
+nextBonusDraw:
+	addi $t1, $t1, 1	# Next bonus
+	j drawBonusesLoop
+	
+drawBonusesDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Draw Score
+# --------------------------------
+drawScore:
+	# Simple score display as a rectangle whose width is proportional to score
+	# For a real game, you'd want to render actual digits
+	
+	# Get score
+	lw $t0, score
+	
+	# Calculate score width (capped at 100)
+	li $t1, 100
+	bge $t0, $t1, capScore
+	j drawScoreBar
+	
+capScore:
+	move $t0, $t1
+	
+drawScoreBar:
+	# Draw score bar at top of screen
+	li $a0, 2		# X position
+	li $a1, 2		# Y position
+	move $a2, $t0		# Width based on score
+	li $a3, 2		# Height
+	lw $t2, scoreColor
+	move $t8, $t2
+	
+	jal drawRectangle
+	
+	jr $ra
+
+# --------------------------------
+# Draw Game Over Screen
+# --------------------------------
+drawGameOver:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Clear the screen
+	jal clearScreen
+	
+	# Draw "GAME OVER" text (simplified as colored rectangles)
+	li $a0, 20		# X position
+	li $a1, 20		# Y position
+	li $a2, 24		# Width
+	li $a3, 4		# Height
+	lw $t0, scoreColor
+	move $t8, $t0
+	
+	jal drawRectangle
+	
+	# Draw score
+	lw $t0, score
+	
+	# Draw score box
+	li $a0, 20		# X position
+	li $a1, 28		# Y position
+	li $a2, 24		# Width
+	li $a3, 4		# Height
+	lw $t1, platformColor
+	move $t8, $t1
+	
+	jal drawRectangle
+	
+	# Draw high score
+	lw $t0, highScore
+	
+	# Draw high score box
+	li $a0, 20		# X position
+	li $a1, 36		# Y position
+	li $a2, $t0		# Width based on high score (simplified)
+	bgt $a2, 24, capHighScore
+	j drawHighScoreBox
+	
+capHighScore:
+	li $a2, 24
+	
+drawHighScoreBox:
+	li $a3, 4		# Height
+	lw $t1, bonusColor
+	move $t8, $t1
+	
+	jal drawRectangle
+	
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Draw Rectangle Helper
+# --------------------------------
+# Arguments:
+# $a0 - X position (in units)
+# $a1 - Y position (in units)
+# $a2 - Width (in units)
+# $a3 - Height (in units)
+# $t8 - Color
+drawRectangle:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Check if rectangle is on screen
+	bltz $a1, skipRectangle	# If Y < 0, skip
+	
+	lw $t0, displayHeight
+	lw $t1, unitSize
+	div $t0, $t0, $t1	# Convert to units
+	bge $a1, $t0, skipRectangle	# If Y >= screen height, skip
+	
+	# Convert from game units to pixel coordinates
+	lw $t0, unitSize
+	mul $a0, $a0, $t0	# X in pixels
+	mul $a1, $a1, $t0	# Y in pixels
+	mul $a2, $a2, $t0	# Width in pixels
+	mul $a3, $a3, $t0	# Height in pixels
+	
+	# Load bitmap display base address
+	lw $t0, displayAddress
+	
+	# Calculate starting position in memory
+	lw $t1, displayWidth
+	mul $t2, $a1, $t1	# Y * displayWidth
+	add $t2, $t2, $a0	# + X
+	sll $t2, $t2, 2		# * 4 (bytes per pixel)
+	add $t2, $t0, $t2	# Add to base address
+	
+	# Initialize row counter
+	li $t3, 0
+	
+rectangleRowLoop:
+	beq $t3, $a3, rectangleDone
+	
+	# Initialize column counter
+	li $t4, 0
+	
+rectangleColLoop:
+	beq $t4, $a2, rectangleNextRow
+	
+	# Calculate pixel address
+	lw $t1, displayWidth
+	mul $t5, $t3, $t1	# rowCounter * displayWidth
+	add $t5, $t5, $t4	# + colCounter
+	sll $t5, $t5, 2		# * 4 (bytes per pixel)
+	add $t6, $t2, $t5	# Add to starting position
+	
+	# Set pixel color
+	sw $t8, 0($t6)
+	
+	# Increment column counter
+	addi $t4, $t4, 1
+	j rectangleColLoop
+	
+rectangleNextRow:
+	# Increment row counter
+	addi $t3, $t3, 1
+	j rectangleRowLoop
+	
+rectangleDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+	
+skipRectangle:
+	# Restore return address and return without drawing
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+	
+	# Check for left movement (a or left arrow)
+	li $t3, 'a'
+	beq $t2, $t3, moveLeft
+	li $t3, 0x61		# ASCII for 'a'
+	beq $t2, $t3, moveLeft
+	li $t3, 0x41		# ASCII for 'A'
+	beq $t2, $t3, moveLeft
+	
+	# Check for right movement (d or right arrow)
+	li $t3, 'd'
+	beq $t2, $t3, moveRight
+	li $t3, 0x64		# ASCII for 'd'
+	beq $t2, $t3, moveRight
+	li $t3, 0x44		# ASCII for 'D'
+	beq $t2, $t3, moveRight
+	
+	j inputDone
+
+moveLeft:
+	# Move player left
+	lw $t3, playerX
+	addi $t3, $t3, -2	# Move left by 2 units
+	
+	# Check bounds
+	bltz $t3, leftBoundHit
+	sw $t3, playerX
+	j inputDone
+	
+leftBoundHit:
+	sw $zero, playerX	# Set to left edge
+	j inputDone
+
+moveRight:
+	# Move player right
+	lw $t3, playerX
+	lw $t4, playerWidth
+	addi $t3, $t3, 2	# Move right by 2 units
+	
+	# Check bounds
+	lw $t5, displayWidth
+	lw $t6, unitSize
+	div $t5, $t5, $t6	# Convert display width to units
+	sub $t5, $t5, $t4	# Adjust for player width
+	
+	bge $t3, $t5, rightBoundHit
+	sw $t3, playerX
+	j inputDone
+	
+rightBoundHit:
+	sub $t5, $t5, 1		# Subtract 1 for safety
+	sw $t5, playerX		# Set to right edge
+	
+inputDone:
+	jr $ra
+
+# --------------------------------
+# Game Update Logic
+# --------------------------------
+updateGame:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Update player velocity due to gravity
+	lw $t0, playerVelocityY
+	lw $t1, gravity
+	add $t0, $t0, $t1
+	sw $t0, playerVelocityY
+	
+	# Update player position based on velocity
+	lw $t2, playerY
+	add $t2, $t2, $t0
+	sw $t2, playerY
+	
+	# Check for platform collision
+	jal checkPlatformCollision
+	
+	# Check for obstacle collision
+	jal checkObstacleCollision
+	
+	# Check for bonus collection
+	jal checkBonusCollection
+	
+	# Check if player falls below screen
+	lw $t0, playerY
+	lw $t1, displayHeight
+	lw $t2, unitSize
+	div $t1, $t1, $t2	# Convert to units
+	
+	bge $t0, $t1, gameOver
+	
+	# Check if player is in upper half of screen and moving up
+	lw $t0, playerY
+	lw $t1, displayHeight
+	lw $t2, unitSize
+	div $t1, $t1, $t2	# Convert to units
+	srl $t1, $t1, 1		# Divide by 2 for half screen height
+	
+	lw $t3, playerVelocityY
+	
+	bgt $t0, $t1, updateDone	# Skip scrolling if not in upper half
+	bgez $t3, updateDone		# Skip scrolling if not moving up
+	
+	# Scroll the world down instead of moving player up
+	neg $t3, $t3		# Negate velocity for scroll amount
+	
+	# Update camera offset
+	lw $t4, cameraOffsetY
+	add $t4, $t4, $t3
+	sw $t4, cameraOffsetY
+	
+	# Update score based on how much we scrolled
+	lw $t5, score
+	add $t5, $t5, $t3
+	sw $t5, score
+	
+	# Update platforms
+	jal updatePlatforms
+	
+	# Update obstacles
+	jal updateObstacles
+	
+	# Update bonuses
+	jal updateBonuses
+	
+	# Keep player at mid-screen
+	lw $t0, displayHeight
+	lw $t1, unitSize
+	div $t0, $t0, $t1	# Convert to units
+	srl $t0, $t0, 1		# Divide by 2 for half height
+	add $t0, $t0, -5	# Adjust to keep player slightly above middle
+	sw $t0, playerY
+	
+updateDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Check Platform Collision
+# --------------------------------
+checkPlatformCollision:
+	# Only check for collision if player is moving downward
+	lw $t0, playerVelocityY
+	blez $t0, noCollision	# Skip if moving up or not moving
+	
+	# Get player position
+	lw $t1, playerX
+	lw $t2, playerY
+	lw $t3, playerWidth
+	lw $t4, playerHeight
+	
+	# Calculate player bottom position
+	add $t5, $t2, $t4	# Bottom Y = playerY + playerHeight
+	
+	# Check each platform
+	la $t6, platforms
+	li $t7, 0		# Platform counter
+	lw $t8, platformCount
+	
+platformCollisionLoop:
+	beq $t7, $t8, noCollision	# Exit if checked all platforms
+	
+	# Calculate offset in platforms array
+	mul $t9, $t7, 8		# Each platform entry is 8 bytes
+	add $t0, $t6, $t9	# Point to current platform
+	
+	# Get platform position
+	lw $s0, 0($t0)		# Platform X
+	lw $s1, 4($t0)		# Platform Y
+	
+	# Check if player bottom is at platform level
+	sub $s2, $t5, $s1	# Player bottom - Platform Y
+	blt $s2, 0, nextPlatform	# Skip if player is above platform
+	bgt $s2, 2, nextPlatform	# Skip if player is too far below platform
+	
+	# Check horizontal overlap
+	add $s3, $s0, 10	# Platform right edge (assuming width = 10)
+	add $s4, $t1, $t3	# Player right edge
+	
+	bge $t1, $s3, nextPlatform	# Skip if player is to the right of platform
+	bge $s0, $s4, nextPlatform	# Skip if player is to the left of platform
+	
+	# Collision detected!
+	# Make player jump
+	lw $s5, playerJumpStrength
+	sw $s5, playerVelocityY
+	
+	j collisionFound
+	
+nextPlatform:
+	addi $t7, $t7, 1	# Next platform
+	j platformCollisionLoop
+	
+noCollision:
+	# No collision detected
+	jr $ra
+	
+collisionFound:
+	# Collision handled
+	jr $ra
+
+# --------------------------------
+# Check Obstacle Collision
+# --------------------------------
+checkObstacleCollision:
+	# Get player position
+	lw $t1, playerX
+	lw $t2, playerY
+	lw $t3, playerWidth
+	lw $t4, playerHeight
+	
+	# Check each obstacle
+	la $t6, obstacles
+	li $t7, 0		# Obstacle counter
+	lw $t8, obstacleCount
+	
+obstacleCollisionLoop:
+	beq $t7, $t8, noObstacleCollision	# Exit if checked all obstacles
+	
+	# Calculate offset in obstacles array
+	mul $t9, $t7, 8		# Each obstacle entry is 8 bytes
+	add $t0, $t6, $t9	# Point to current obstacle
+	
+	# Get obstacle position
+	lw $s0, 0($t0)		# Obstacle X
+	lw $s1, 4($t0)		# Obstacle Y
+	
+	# Check rectangular collision
+	add $s2, $t1, $t3	# Player right
+	add $s3, $t2, $t4	# Player bottom
+	add $s4, $s0, 4		# Obstacle right (assuming width = 4)
+	add $s5, $s1, 4		# Obstacle bottom (assuming height = 4)
+	
+	bge $t1, $s4, nextObstacle	# Skip if player is to the right of obstacle
+	bge $s0, $s2, nextObstacle	# Skip if player is to the left of obstacle
+	bge $t2, $s5, nextObstacle	# Skip if player is below obstacle
+	bge $s1, $s3, nextObstacle	# Skip if player is above obstacle
+	
+	# Collision detected!
+	j gameOver
+	
+nextObstacle:
+	addi $t7, $t7, 1	# Next obstacle
+	j obstacleCollisionLoop
+	
+noObstacleCollision:
+	# No collision detected
+	jr $ra
+
+# --------------------------------
+# Check Bonus Collection
+# --------------------------------
+checkBonusCollection:
+	# Get player position
+	lw $t1, playerX
+	lw $t2, playerY
+	lw $t3, playerWidth
+	lw $t4, playerHeight
+	
+	# Check each bonus
+	la $t6, bonuses
+	li $t7, 0		# Bonus counter
+	lw $t8, bonusCount
+	
+bonusCollectionLoop:
+	beq $t7, $t8, noBonusCollection	# Exit if checked all bonuses
+	
+	# Calculate offset in bonuses array
+	mul $t9, $t7, 12	# Each bonus entry is 12 bytes
+	add $t0, $t6, $t9	# Point to current bonus
+	
+	# Check if bonus is active
+	lw $s0, 8($t0)		# Active flag
+	beqz $s0, nextBonus	# Skip if not active
+	
+	# Get bonus position
+	lw $s1, 0($t0)		# Bonus X
+	lw $s2, 4($t0)		# Bonus Y
+	
+	# Check rectangular collision
+	add $s3, $t1, $t3	# Player right
+	add $s4, $t2, $t4	# Player bottom
+	add $s5, $s1, 3		# Bonus right (assuming width = 3)
+	add $s6, $s2, 3		# Bonus bottom (assuming height = 3)
+	
+	bge $t1, $s5, nextBonus	# Skip if player is to the right of bonus
+	bge $s1, $s3, nextBonus	# Skip if player is to the left of bonus
+	bge $t2, $s6, nextBonus	# Skip if player is below bonus
+	bge $s2, $s4, nextBonus	# Skip if player is above bonus
+	
+	# Bonus collected!
+	# Increase score
+	lw $s7, score
+	addi $s7, $s7, 50	# Add 50 points
+	sw $s7, score
+	
+	# Deactivate bonus
+	sw $zero, 8($t0)
+	
+	# Generate new bonus position
+	jal random
+	li $s7, 57
+	rem $s7, $v0, $s7
+	sw $s7, 0($t0)		# Store X
+	
+	jal random
+	li $s7, 60
+	rem $s7, $v0, $s7
+	sub $s7, $zero, $s7	# Make negative for position above screen
+	sw $s7, 4($t0)		# Store Y
+	
+	# Reactivate bonus
+	li $s7, 1
+	sw $s7, 8($t0)
+	
+nextBonus:
+	addi $t7, $t7, 1	# Next bonus
+	j bonusCollectionLoop
+	
+noBonusCollection:
+	# No bonus collected
+	jr $ra
+
+# --------------------------------
+# Update Platforms
+# --------------------------------
+updatePlatforms:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Get scroll amount (negated player velocity)
+	lw $t0, playerVelocityY
+	neg $t0, $t0
+	
+	# Update each platform
+	la $t1, platforms
+	li $t2, 0		# Platform counter
+	lw $t3, platformCount
+	
+updatePlatformsLoop:
+	beq $t2, $t3, updatePlatformsDone
+	
+	# Calculate offset in platforms array
+	mul $t4, $t2, 8		# Each platform entry is 8 bytes
+	add $t5, $t1, $t4	# Point to current platform
+	
+	# Update platform Y position
+	lw $t6, 4($t5)		# Load Y
+	add $t6, $t6, $t0	# Add scroll amount
+	sw $t6, 4($t5)		# Store updated Y
+	
+	# Check if platform is below screen
+	lw $t7, displayHeight
+	lw $t8, unitSize
+	div $t7, $t7, $t8	# Convert to units
+	
+	blt $t6, $t7, nextPlatformUpdate
+	
+	# Platform is below screen, regenerate it at top
+	jal random
+	li $t8, 57
+	rem $t8, $v0, $t8
+	sw $t8, 0($t5)		# Store new X
+	
+	# Calculate new Y position at top of screen
+	lw $t8, cameraOffsetY
+	neg $t8, $t8
+	addi $t8, $t8, -10	# Place slightly above visible area
+	sw $t8, 4($t5)		# Store new Y
+	
+nextPlatformUpdate:
+	addi $t2, $t2, 1	# Next platform
+	j updatePlatformsLoop
+	
+updatePlatformsDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Update Obstacles
+# --------------------------------
+updateObstacles:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Get scroll amount (negated player velocity)
+	lw $t0, playerVelocityY
+	neg $t0, $t0
+	
+	# Update each obstacle
+	la $t1, obstacles
+	li $t2, 0		# Obstacle counter
+	lw $t3, obstacleCount
+	
+updateObstaclesLoop:
+	beq $t2, $t3, updateObstaclesDone
+	
+	# Calculate offset in obstacles array
+	mul $t4, $t2, 8		# Each obstacle entry is 8 bytes
+	add $t5, $t1, $t4	# Point to current obstacle
+	
+	# Update obstacle Y position
+	lw $t6, 4($t5)		# Load Y
+	add $t6, $t6, $t0	# Add scroll amount
+	sw $t6, 4($t5)		# Store updated Y
+	
+	# Check if obstacle is below screen
+	lw $t7, displayHeight
+	lw $t8, unitSize
+	div $t7, $t7, $t8	# Convert to units
+	
+	blt $t6, $t7, nextObstacleUpdate
+	
+	# Obstacle is below screen, regenerate it at top
+	jal random
+	li $t8, 57
+	rem $t8, $v0, $t8
+	sw $t8, 0($t5)		# Store new X
+	
+	# Calculate new Y position at top of screen
+	lw $t8, cameraOffsetY
+	neg $t8, $t8
+	addi $t8, $t8, -30	# Place well above visible area
+	sw $t8, 4($t5)		# Store new Y
+	
+nextObstacleUpdate:
+	addi $t2, $t2, 1	# Next obstacle
+	j updateObstaclesLoop
+	
+updateObstaclesDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Update Bonuses
+# --------------------------------
+updateBonuses:
+	# Save return address
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	
+	# Get scroll amount (negated player velocity)
+	lw $t0, playerVelocityY
+	neg $t0, $t0
+	
+	# Update each bonus
+	la $t1, bonuses
+	li $t2, 0		# Bonus counter
+	lw $t3, bonusCount
+	
+updateBonusesLoop:
+	beq $t2, $t3, updateBonusesDone
+	
+	# Calculate offset in bonuses array
+	mul $t4, $t2, 12	# Each bonus entry is 12 bytes
+	add $t5, $t1, $t4	# Point to current bonus
+	
+	# Skip if bonus is not active
+	lw $t6, 8($t5)
+	beqz $t6, nextBonusUpdate
+	
+	# Update bonus Y position
+	lw $t6, 4($t5)		# Load Y
+	add $t6, $t6, $t0	# Add scroll amount
+	sw $t6, 4($t5)		# Store updated Y
+	
+	# Check if bonus is below screen
+	lw $t7, displayHeight
+	lw $t8, unitSize
+	div $t7, $t7, $t8	# Convert to units
+	
+	blt $t6, $t7, nextBonusUpdate
+	
+	# Bonus is below screen, regenerate it at top
+	jal random
+	li $t8, 57
+	rem $t8, $v0, $t8
+	sw $t8, 0($t5)		# Store new X
+	
+	# Calculate new Y position at top of screen
+	lw $t8, cameraOffsetY
+	neg $t8, $t8
+	addi $t8, $t8, -40	# Place well above visible area
+	sw $t8, 4($t5)		# Store new Y
+	
+nextBonusUpdate:
+	addi $t2, $t2, 1	# Next bonus
+	j updateBonusesLoop
+	
+updateBonusesDone:
+	# Restore return address and return
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+# --------------------------------
+# Game Over
+# --------------------------------
+gameOver:
+	# Set game as inactive
+	sw $zero, gameActive
+	
+	# Update high score if needed
+	lw $t0, score
+	lw $t1, highScore
+	bge $t1, $t0, gameOverDone
+	sw $t0, highScore
+	
+gameOverDone:
+	jr $ra
+
+# --------------------------------
+# Check Restart Input
+# --------------------------------
+checkRestartInput:
+	# Check for keyboard input
+	li $t0, 0xffff0000	# Keyboard control address
+	lw $t1, 0($t0)		# Check if input is available
+	beqz $t1, restartInputDone	# If no input, return
+	
+	# Read the input
+	lw $t2, 4($t0)		# Get the input character
