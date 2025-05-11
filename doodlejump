@@ -669,7 +669,7 @@ drawGameOver:
 	# Draw score box
 	li $a0, 20		# X position
 	li $a1, 28		# Y position
-	li $a2, 24		# Width
+	li $a2, 24		# Width (fixed width)
 	li $a3, 4		# Height
 	lw $t1, platformColor
 	move $t8, $t1
@@ -682,8 +682,9 @@ drawGameOver:
 	# Draw high score box
 	li $a0, 20		# X position
 	li $a1, 36		# Y position
-	li $a2, $t0		# Width based on high score (simplified)
-	bgt $a2, 24, capHighScore
+	move $a2, $t0		# Width based on high score (simplified)
+	li $t1, 24		# Maximum width
+	bgt $a2, $t1, capHighScore
 	j drawHighScoreBox
 	
 capHighScore:
